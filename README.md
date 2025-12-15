@@ -12,9 +12,14 @@ Supported Benchmarks:
 - mmlu
 
 ## Quick Start
+
+Clone into the repo: 
 ```
 git clone https://github.com/TeichAI/Model-Benchmark-Suite.git
 cd Model-Benchmark-Suite
+```
+Install deps and start the app:
+```
 pip install -r requirements.txt
 streamlit run app.py
 ```
