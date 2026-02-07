@@ -23,6 +23,15 @@ def run_lm_eval(
     apply_chat_template=False,
     backend="hf",
 ):
+    tasks_list = list(tasks_list)
+    if apply_chat_template and "humaneval" in tasks_list:
+        tasks_list = [
+            "humaneval_instruct" if task == "humaneval" else task
+            for task in tasks_list
+        ]
+        print(
+            "apply_chat_template=True: using humaneval_instruct for chat/instruct models."
+        )
     print(
         f"Running LM Eval on {model_name} with tasks {tasks_list}, "
         f"{quantization} quantization, backend={backend}..."
@@ -87,6 +96,7 @@ def run_lm_eval(
                 num_fewshot=0,
                 batch_size="auto",
                 limit=limit,
+                confirm_run_unsafe_code=allow_code_eval,
                 apply_chat_template=apply_chat_template,
                 gen_kwargs={
                     "temperature": temperature,
@@ -130,6 +140,7 @@ def run_lm_eval(
                 batch_size=batch_size,
                 limit=limit,
                 device=device,
+                confirm_run_unsafe_code=allow_code_eval,
                 apply_chat_template=apply_chat_template,
                 gen_kwargs={
                     "temperature": temperature,

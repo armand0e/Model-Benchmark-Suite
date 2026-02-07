@@ -824,7 +824,9 @@ def summarize_results(model, benchmark, data):
             "acc_norm,none",
             "exact_match,none",
             "prompt_level_strict_acc,none",
+            "pass@1,create_test",
             "pass@1,none",
+            "pass@1",
         ]
         task_score = None
         for key in metric_keys:
