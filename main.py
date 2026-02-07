@@ -104,8 +104,11 @@ def main():
             backend=args.backend,
         )
     except Exception as e:
-        print(f"LM Eval Failed: {e}")
-        logger.error(f"LM Eval Failed: {e}")
+        import traceback
+
+        tb = traceback.format_exc()
+        print(f"LM Eval Failed: {e}\n{tb}")
+        logger.error(f"LM Eval Failed: {e}\n{tb}")
         results["lm_eval"] = str(e)
 
     class CustomEncoder(json.JSONEncoder):

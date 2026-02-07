@@ -1,4 +1,5 @@
 import argparse
+import os
 import torch
 from lm_eval import tasks, evaluator, utils
 from lm_eval.models.huggingface import HFLM
@@ -27,13 +28,46 @@ def run_lm_eval(
         from huggingface_hub import login
 
         login(token=hf_token)
+        os.environ["HF_TOKEN"] = hf_token
+        os.environ["HUGGING_FACE_HUB_TOKEN"] = hf_token
         print("Authenticated with HuggingFace token.")
+    elif not os.environ.get("HF_TOKEN"):
+        # No explicit token provided and HF_TOKEN not set — try to use cached token from `hf auth login`
+        from huggingface_hub import get_token
+
+        cached_token = get_token()
+        if cached_token:
+            os.environ["HF_TOKEN"] = cached_token
+            os.environ["HUGGING_FACE_HUB_TOKEN"] = cached_token
+            print("Using cached HuggingFace token.")
 
     if backend == "vllm":
         # vLLM backend: faster inference, Linux/WSL only
-        model_args = f"pretrained={model_name},dtype=auto,gpu_memory_utilization=0.8,trust_remote_code=True"
+        # Auto-detect safe gpu_memory_utilization based on free memory
+        gpu_mem_util = 0.8
+        if torch.cuda.is_available():
+            free_mem, total_mem = torch.cuda.mem_get_info(0)
+            # Use 90% of currently free memory as a fraction of total
+            safe_util = round((free_mem * 0.9) / total_mem, 2)
+            gpu_mem_util = min(safe_util, 0.9)
+            print(
+                f"GPU memory: {free_mem // (1024**2)}MB free / {total_mem // (1024**2)}MB total "
+                f"-> gpu_memory_utilization={gpu_mem_util}"
+            )
+        max_model_len = int(os.getenv("VLLM_MAX_MODEL_LEN", "8192"))
+        model_args = (
+            f"pretrained={model_name},dtype=auto,"
+            f"gpu_memory_utilization={gpu_mem_util},"
+            f"trust_remote_code=True,max_model_len={max_model_len}"
+        )
+
+        # Apply quantization for vLLM (bitsandbytes 4bit/8bit)
+        if quantization in ("4bit", "8bit"):
+            model_args += ",quantization=bitsandbytes,load_format=bitsandbytes"
+
+        # Pass hf_token directly to vLLM (supported natively)
         if hf_token:
-            model_args += f",token={hf_token}"
+            model_args += f",hf_token={hf_token}"
 
         results = evaluator.simple_evaluate(
             model="vllm",
