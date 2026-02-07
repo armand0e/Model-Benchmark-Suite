@@ -55,6 +55,8 @@ benchmarks = st.sidebar.multiselect(
         "hellaswag",
         "truthfulqa_mc2",
         "mmlu",
+        "ifeval",
+        "humaneval",
     ],
     default=["gpqa_diamond_zeroshot"],
 )
@@ -64,7 +66,25 @@ run_deepeval = st.sidebar.checkbox("Run DeepEval (Qualitative Metrics)", value=F
 if run_deepeval and not os.getenv("OPENROUTER_API_KEY"):
     st.sidebar.warning("OPENROUTER_API_KEY not set. DeepEval may fail.")
 
+# HuggingFace Token (for private models)
+with st.sidebar.expander("HuggingFace Token"):
+    hf_token = st.text_input(
+        "HF Token",
+        type="password",
+        help="Enter your HuggingFace token to access private/gated models. "
+        "Get one at https://huggingface.co/settings/tokens",
+    )
+    if hf_token:
+        st.success("Token provided ✓")
+
 # Settings
+backend = st.sidebar.selectbox(
+    "Inference Backend",
+    ["hf", "vllm"],
+    index=0,
+    help="'hf' = HuggingFace Transformers (works everywhere). "
+    "'vllm' = vLLM (Linux/WSL only, much faster for generation tasks like ifeval/humaneval).",
+)
 quantization = st.sidebar.selectbox("Quantization", ["4bit", "8bit", "none"], index=0)
 overwrite_saved = st.sidebar.checkbox("Overwrite saved results", value=False)
 
@@ -765,11 +785,23 @@ def summarize_results(model, benchmark, data):
     task_metrics = lm_res.get(benchmark, {})
 
     if isinstance(task_metrics, dict):
-        task_score = task_metrics.get("acc,none")
-        if task_score is None:
-            task_score = task_metrics.get("acc_norm,none")
-        if task_score is None:
-            task_score = task_metrics.get("exact_match,none")
+        # Try common metric keys in priority order across different benchmark types:
+        # - acc,none / acc_norm,none: standard multiple-choice benchmarks
+        # - exact_match,none: gsm8k and similar
+        # - prompt_level_strict_acc,none: ifeval
+        # - pass@1,none: humaneval (code generation)
+        metric_keys = [
+            "acc,none",
+            "acc_norm,none",
+            "exact_match,none",
+            "prompt_level_strict_acc,none",
+            "pass@1,none",
+        ]
+        task_score = None
+        for key in metric_keys:
+            task_score = task_metrics.get(key)
+            if task_score is not None:
+                break
         if task_score is None:
             task_score = 0
         score = task_score
@@ -816,6 +848,7 @@ def get_run_config(model, benchmark):
     return {
         "model": model,
         "benchmark": benchmark,
+        "backend": backend,
         "quantization": quantization,
         "temperature": float(temperature),
         "top_p": float(top_p),
@@ -1014,6 +1047,8 @@ elif run_clicked:
                     "lm_eval",
                     "--tasks",
                     benchmark,
+                    "--backend",
+                    backend,
                     "--quantization",
                     quantization,
                     "--temperature",
@@ -1032,6 +1067,9 @@ elif run_clicked:
 
                 if run_deepeval:
                     cmd.append("--deepeval")
+
+                if hf_token:
+                    cmd.extend(["--hf_token", hf_token])
 
                 # Run subprocess with real-time logging
                 try:

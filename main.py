@@ -69,6 +69,19 @@ def main():
     parser.add_argument("--top_p", type=float, default=0.95)
     parser.add_argument("--top_k", type=int, default=20)
     parser.add_argument("--repetition_penalty", type=float, default=1.1)
+    parser.add_argument(
+        "--backend",
+        type=str,
+        choices=["hf", "vllm"],
+        default="hf",
+        help="Inference backend: 'hf' for HuggingFace Transformers, 'vllm' for vLLM (Linux only, faster)",
+    )
+    parser.add_argument(
+        "--hf_token",
+        type=str,
+        default=None,
+        help="HuggingFace token for accessing private/gated models",
+    )
 
     args = parser.parse_args()
 
@@ -87,6 +100,8 @@ def main():
             top_p=args.top_p,
             top_k=args.top_k,
             repetition_penalty=args.repetition_penalty,
+            hf_token=args.hf_token,
+            backend=args.backend,
         )
     except Exception as e:
         print(f"LM Eval Failed: {e}")

@@ -1,4 +1,6 @@
-lm_eval
+lm_eval[ifeval,sentencepiece,vllm]
+huggingface_hub
+evaluate
 transformers
 accelerate
 bitsandbytes
