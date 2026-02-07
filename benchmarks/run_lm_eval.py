@@ -1,8 +1,10 @@
 import argparse
 import os
+import gc
 import torch
 from lm_eval import tasks, evaluator, utils
 from lm_eval.models.huggingface import HFLM
+from lm_eval.models.utils_hf import clear_torch_cache
 
 
 def run_lm_eval(
@@ -10,12 +12,15 @@ def run_lm_eval(
     tasks_list=["gpqa_diamond_zeroshot"],
     limit=None,
     batch_size=1,
+    max_model_len=None,
     quantization="4bit",
     temperature=0.6,
     top_p=0.95,
     top_k=20,
     repetition_penalty=1.1,
     hf_token=None,
+    allow_code_eval=False,
+    apply_chat_template=False,
     backend="hf",
 ):
     print(
@@ -41,95 +46,110 @@ def run_lm_eval(
             os.environ["HUGGING_FACE_HUB_TOKEN"] = cached_token
             print("Using cached HuggingFace token.")
 
-    if backend == "vllm":
-        # vLLM backend: faster inference, Linux/WSL only
-        # Auto-detect safe gpu_memory_utilization based on free memory
-        gpu_mem_util = 0.8
-        if torch.cuda.is_available():
-            free_mem, total_mem = torch.cuda.mem_get_info(0)
-            # Use 90% of currently free memory as a fraction of total
-            safe_util = round((free_mem * 0.9) / total_mem, 2)
-            gpu_mem_util = min(safe_util, 0.9)
-            print(
-                f"GPU memory: {free_mem // (1024**2)}MB free / {total_mem // (1024**2)}MB total "
-                f"-> gpu_memory_utilization={gpu_mem_util}"
-            )
-        max_model_len = int(os.getenv("VLLM_MAX_MODEL_LEN", "8192"))
-        model_args = (
-            f"pretrained={model_name},dtype=auto,"
-            f"gpu_memory_utilization={gpu_mem_util},"
-            f"trust_remote_code=True,max_model_len={max_model_len}"
-        )
+    if allow_code_eval:
+        os.environ["HF_ALLOW_CODE_EVAL"] = "1"
 
-        # Apply quantization for vLLM (bitsandbytes 4bit/8bit)
-        if quantization in ("4bit", "8bit"):
-            model_args += ",quantization=bitsandbytes,load_format=bitsandbytes"
-
-        # Pass hf_token directly to vLLM (supported natively)
-        if hf_token:
-            model_args += f",hf_token={hf_token}"
-
-        results = evaluator.simple_evaluate(
-            model="vllm",
-            model_args=model_args,
-            tasks=tasks_list,
-            num_fewshot=0,
-            batch_size="auto",
-            limit=limit,
-            gen_kwargs={
-                "temperature": temperature,
-                "top_p": top_p,
-                "top_k": top_k,
-                "repetition_penalty": repetition_penalty,
-                "do_sample": True,
-            },
-            log_samples=True,
-        )
-    else:
-        # HuggingFace Transformers backend (default)
-        if quantization == "4bit":
+    results = None
+    try:
+        if backend == "vllm":
+            # vLLM backend: faster inference, Linux/WSL only
+            # Auto-detect safe gpu_memory_utilization based on free memory
+            gpu_mem_util = 0.8
+            if torch.cuda.is_available():
+                free_mem, total_mem = torch.cuda.mem_get_info(0)
+                # Use 90% of currently free memory as a fraction of total
+                safe_util = round((free_mem * 0.9) / total_mem, 2)
+                gpu_mem_util = min(safe_util, 0.9)
+                print(
+                    f"GPU memory: {free_mem // (1024**2)}MB free / {total_mem // (1024**2)}MB total "
+                    f"-> gpu_memory_utilization={gpu_mem_util}"
+                )
+            if max_model_len is None:
+                max_model_len = os.getenv("VLLM_MAX_MODEL_LEN", "8192")
+            max_model_len = int(max_model_len)
             model_args = (
-                f"pretrained={model_name},load_in_4bit=True,trust_remote_code=True"
-            )
-        elif quantization == "8bit":
-            model_args = (
-                f"pretrained={model_name},load_in_8bit=True,trust_remote_code=True"
-            )
-        else:  # None or bf16
-            model_args = (
-                f"pretrained={model_name},dtype=bfloat16,trust_remote_code=True"
+                f"pretrained={model_name},dtype=auto,"
+                f"gpu_memory_utilization={gpu_mem_util},"
+                f"trust_remote_code=True,max_model_len={max_model_len}"
             )
 
-        # Pass token in model_args so the model loader can access private repos
-        if hf_token:
-            model_args += f",token={hf_token}"
+            # Apply quantization for vLLM (bitsandbytes 4bit/8bit)
+            if quantization in ("4bit", "8bit"):
+                model_args += ",quantization=bitsandbytes,load_format=bitsandbytes"
 
-        # Auto-detect device instead of hard-coding CUDA
-        if torch.cuda.is_available():
-            device = "cuda:0"
+            # Pass hf_token directly to vLLM (supported natively)
+            if hf_token:
+                model_args += f",hf_token={hf_token}"
+
+            results = evaluator.simple_evaluate(
+                model="vllm",
+                model_args=model_args,
+                tasks=tasks_list,
+                num_fewshot=0,
+                batch_size="auto",
+                limit=limit,
+                apply_chat_template=apply_chat_template,
+                gen_kwargs={
+                    "temperature": temperature,
+                    "top_p": top_p,
+                    "top_k": top_k,
+                    "repetition_penalty": repetition_penalty,
+                    "do_sample": True,
+                },
+                log_samples=True,
+            )
         else:
-            device = "cpu"
-            print("CUDA not available, using CPU. This may be slow for large models.")
+            # HuggingFace Transformers backend (default)
+            if quantization == "4bit":
+                model_args = (
+                    f"pretrained={model_name},load_in_4bit=True,trust_remote_code=True"
+                )
+            elif quantization == "8bit":
+                model_args = (
+                    f"pretrained={model_name},load_in_8bit=True,trust_remote_code=True"
+                )
+            else:  # None or bf16
+                model_args = (
+                    f"pretrained={model_name},dtype=bfloat16,trust_remote_code=True"
+                )
 
-        results = evaluator.simple_evaluate(
-            model="hf",
-            model_args=model_args,
-            tasks=tasks_list,
-            num_fewshot=0,
-            batch_size=batch_size,
-            limit=limit,
-            device=device,
-            gen_kwargs={
-                "temperature": temperature,
-                "top_p": top_p,
-                "top_k": top_k,
-                "repetition_penalty": repetition_penalty,
-                "do_sample": True,
-            },
-            log_samples=True,
-        )
+            # Pass token in model_args so the model loader can access private repos
+            if hf_token:
+                model_args += f",token={hf_token}"
 
-    return results
+            # Auto-detect device instead of hard-coding CUDA
+            if torch.cuda.is_available():
+                device = "cuda:0"
+            else:
+                device = "cpu"
+                print("CUDA not available, using CPU. This may be slow for large models.")
+
+            results = evaluator.simple_evaluate(
+                model="hf",
+                model_args=model_args,
+                tasks=tasks_list,
+                num_fewshot=0,
+                batch_size=batch_size,
+                limit=limit,
+                device=device,
+                apply_chat_template=apply_chat_template,
+                gen_kwargs={
+                    "temperature": temperature,
+                    "top_p": top_p,
+                    "top_k": top_k,
+                    "repetition_penalty": repetition_penalty,
+                    "do_sample": True,
+                },
+                log_samples=True,
+            )
+
+        return results
+    finally:
+        try:
+            clear_torch_cache()
+        except Exception:
+            pass
+        gc.collect()
 
 
 if __name__ == "__main__":

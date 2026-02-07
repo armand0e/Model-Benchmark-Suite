@@ -49,6 +49,12 @@ def main():
         help="Batch size for lm_eval inference (parallel examples per step)",
     )
     parser.add_argument(
+        "--max_model_len",
+        type=int,
+        default=None,
+        help="Max context length for vLLM (limits KV cache memory)",
+    )
+    parser.add_argument(
         "--output",
         type=str,
         default=os.path.join("saved_results", "results.json"),
@@ -82,6 +88,16 @@ def main():
         default=None,
         help="HuggingFace token for accessing private/gated models",
     )
+    parser.add_argument(
+        "--allow_code_eval",
+        action="store_true",
+        help="Allow code execution for code_eval/Humaneval tasks",
+    )
+    parser.add_argument(
+        "--apply_chat_template",
+        action="store_true",
+        help="Apply chat template for instruct/chat models",
+    )
 
     args = parser.parse_args()
 
@@ -95,12 +111,15 @@ def main():
             tasks,
             limit=args.limit,
             batch_size=args.batch_size,
+            max_model_len=args.max_model_len,
             quantization=args.quantization,
             temperature=args.temperature,
             top_p=args.top_p,
             top_k=args.top_k,
             repetition_penalty=args.repetition_penalty,
             hf_token=args.hf_token,
+            allow_code_eval=args.allow_code_eval,
+            apply_chat_template=args.apply_chat_template,
             backend=args.backend,
         )
     except Exception as e:

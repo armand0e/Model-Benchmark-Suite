@@ -9,6 +9,10 @@ import sys
 import io
 import zipfile
 import plotly.io as pio
+import tempfile
+import time
+import signal
+from collections import deque
 
 PLOTLY_DOWNLOAD_CONFIG = {
     "toImageButtonOptions": {
@@ -86,6 +90,31 @@ backend = st.sidebar.selectbox(
     "'vllm' = vLLM (Linux/WSL only, much faster for generation tasks like ifeval/humaneval).",
 )
 quantization = st.sidebar.selectbox("Quantization", ["4bit", "8bit", "none"], index=0)
+vllm_max_model_len_default = int(os.getenv("VLLM_MAX_MODEL_LEN", "8192"))
+vllm_max_model_len = st.sidebar.number_input(
+    "vLLM Max Context Length",
+    min_value=512,
+    max_value=262144,
+    value=vllm_max_model_len_default,
+    step=512,
+    disabled=backend != "vllm",
+    help="Sets vLLM max_model_len to limit KV cache memory."
+    " Only applies to vLLM backend.",
+)
+allow_code_eval = st.sidebar.checkbox(
+    "Allow code execution (Humaneval/code_eval)",
+    value=False,
+    disabled="humaneval" not in benchmarks,
+    help=(
+        "Required for Humaneval/code_eval. Runs untrusted model code; "
+        "enable only in a sandboxed environment."
+    ),
+)
+apply_chat_template = st.sidebar.checkbox(
+    "Apply chat template",
+    value=True,
+    help="Recommended for instruct/chat models to format prompts correctly.",
+)
 overwrite_saved = st.sidebar.checkbox("Overwrite saved results", value=False)
 
 # Sampling Parameters
@@ -850,6 +879,9 @@ def get_run_config(model, benchmark):
         "benchmark": benchmark,
         "backend": backend,
         "quantization": quantization,
+        "max_model_len": int(vllm_max_model_len) if backend == "vllm" else None,
+        "allow_code_eval": bool(allow_code_eval),
+        "apply_chat_template": bool(apply_chat_template),
         "temperature": float(temperature),
         "top_p": float(top_p),
         "top_k": int(top_k),
@@ -1051,6 +1083,12 @@ elif run_clicked:
                     backend,
                     "--quantization",
                     quantization,
+                ]
+
+                if backend == "vllm":
+                    cmd.extend(["--max_model_len", str(int(vllm_max_model_len))])
+
+                cmd += [
                     "--temperature",
                     str(temperature),
                     "--top_p",
@@ -1071,44 +1109,83 @@ elif run_clicked:
                 if hf_token:
                     cmd.extend(["--hf_token", hf_token])
 
+                if allow_code_eval:
+                    cmd.append("--allow_code_eval")
+
+                if apply_chat_template:
+                    cmd.append("--apply_chat_template")
+
                 # Run subprocess with real-time logging
+                process = None
+                log_path = None
                 try:
-                    process = subprocess.Popen(
-                        cmd,
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.STDOUT,
-                        text=True,
-                        bufsize=1,
-                        universal_newlines=True,
-                    )
+                    with tempfile.NamedTemporaryFile(
+                        mode="w+", suffix=".log", delete=False
+                    ) as log_file:
+                        log_path = log_file.name
 
-                    full_logs = []
-                    latest_line = ""
+                        process = subprocess.Popen(
+                            cmd,
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT,
+                            text=True,
+                            bufsize=1,
+                            universal_newlines=True,
+                            start_new_session=True,
+                        )
 
-                    with st.spinner(f"Running **{benchmark}** for **{model}**:"):
-                        log_placeholder = st.empty()
+                        recent_lines = deque(maxlen=200)
+                        latest_line = ""
+                        last_ui_update = 0.0
+                        line_count = 0
 
-                        while True:
-                            line = process.stdout.readline()
-                            if not line and process.poll() is not None:
-                                break
-                            if line:
-                                full_logs.append(line)
-                                candidate = line.rstrip()
-                                if candidate:
-                                    latest_line = candidate
-                                    log_placeholder.code(latest_line, language="bash")
+                        with st.spinner(
+                            f"Running **{benchmark}** for **{model}**:"):
+                            log_placeholder = st.empty()
 
-                    # Clear live log line once the run is finished
-                    log_placeholder.empty()
+                            while True:
+                                line = process.stdout.readline()
+                                if not line and process.poll() is not None:
+                                    break
+                                if line:
+                                    log_file.write(line)
+                                    line_count += 1
+                                    if line_count % 20 == 0:
+                                        log_file.flush()
+                                    candidate = line.rstrip()
+                                    if candidate:
+                                        recent_lines.append(candidate)
+                                        latest_line = candidate
+                                        now = time.time()
+                                        if now - last_ui_update > 0.25:
+                                            log_placeholder.code(
+                                                latest_line, language="bash"
+                                            )
+                                            last_ui_update = now
 
-                    # Join all logs for download
-                    final_logs = "".join(full_logs)
+                        # Clear live log line once the run is finished
+                        log_placeholder.empty()
+
+                        # Ensure log is flushed
+                        log_file.flush()
+
+                    # Join all logs for download (read from temp file)
+                    final_logs = ""
+                    if log_path and os.path.exists(log_path):
+                        with open(log_path, "r", encoding="utf-8") as f:
+                            final_logs = f.read()
+
+                    # Clean up temp log file
+                    if log_path and os.path.exists(log_path):
+                        try:
+                            os.remove(log_path)
+                        except OSError:
+                            pass
 
                     if process.returncode != 0:
                         st.error(f"Error running {benchmark} on {model}")
-                        if latest_line:
-                            st.code(latest_line, language="bash")
+                        if recent_lines:
+                            st.code("\n".join(recent_lines), language="bash")
                         st.download_button(
                             label="Download Full Logs (Error)",
                             data=final_logs,
@@ -1170,6 +1247,25 @@ elif run_clicked:
                     import traceback
 
                     st.code(traceback.format_exc())
+                finally:
+                    # Ensure subprocess is terminated and pipes are closed
+                    try:
+                        if process and process.poll() is None:
+                            try:
+                                os.killpg(process.pid, signal.SIGTERM)
+                            except Exception:
+                                process.terminate()
+                            try:
+                                process.wait(timeout=10)
+                            except Exception:
+                                try:
+                                    os.killpg(process.pid, signal.SIGKILL)
+                                except Exception:
+                                    process.kill()
+                        if process and process.stdout:
+                            process.stdout.close()
+                    except Exception:
+                        pass
 
         status_text.text("All benchmarks completed!")
         st.session_state.results = results_list
