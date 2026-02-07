@@ -77,9 +77,8 @@ def run_lm_eval(
             if quantization in ("4bit", "8bit"):
                 model_args += ",quantization=bitsandbytes,load_format=bitsandbytes"
 
-            # Pass hf_token directly to vLLM (supported natively)
-            if hf_token:
-                model_args += f",hf_token={hf_token}"
+            # Avoid embedding tokens in model_args (results JSON stores model_args)
+            # Authentication is handled via HF_TOKEN env var above.
 
             results = evaluator.simple_evaluate(
                 model="vllm",
@@ -113,9 +112,8 @@ def run_lm_eval(
                     f"pretrained={model_name},dtype=bfloat16,trust_remote_code=True"
                 )
 
-            # Pass token in model_args so the model loader can access private repos
-            if hf_token:
-                model_args += f",token={hf_token}"
+            # Avoid embedding tokens in model_args (results JSON stores model_args)
+            # Authentication is handled via HF_TOKEN env var above.
 
             # Auto-detect device instead of hard-coding CUDA
             if torch.cuda.is_available():
